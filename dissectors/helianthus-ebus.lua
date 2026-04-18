@@ -138,7 +138,13 @@ function plugin.family_guess(opcode)
   return "ebus-semantic"
 end
 
-function plugin.transaction_type(zz)
+function plugin.transaction_type(qq, zz)
+  local function invalid_address(addr)
+    return addr == 0xA9 or addr == 0xAA
+  end
+  if invalid_address(qq) or invalid_address(zz) then
+    return "Invalid"
+  end
   if zz == 0xFE then
     return "Broadcast"
   end
@@ -325,8 +331,11 @@ function proto.dissector(buffer, pinfo, tree)
   subtree:add(fields.opcode, buffer(9, 2))
   subtree:add(fields.opcode_label, plugin.lookup_label(opcode))
   subtree:add(fields.family, plugin.family_guess(opcode))
-  local transaction_type = plugin.transaction_type(zz)
+  local transaction_type = plugin.transaction_type(qq, zz)
   subtree:add(fields.frame_type, transaction_type)
+  if transaction_type == "Invalid" then
+    subtree:add_expert_info(PI_MALFORMED, PI_WARN, "Invalid eBUS address (0xA9/0xAA)")
+  end
 
   if transaction_type == "Primary-Secondary" then
     local segments, segment_err = plugin.parse_primary_secondary_segments(raw_tvb)
