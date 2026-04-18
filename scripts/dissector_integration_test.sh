@@ -92,6 +92,11 @@ expect_match "WS20 reserved byte exposed" "${ebus_tree}" "Reserved (byte 11)"
 expect_no_match "WS22 no resetted leak on ebus frames" "${ebus_tree}" "ENS command label"
 # WS25: new Vaillant label (B503 used in invalid-address fixtures).
 expect_match "WS25 B503 label" "${ebus_tree}" "Vaillant B503"
+# WS15 + WS20 + WS26 supplementary coverage from the expanded fixture set.
+expect_match "WS15 primary-secondary NAK exposes Reply: <none>" "${ebus_tree}" "Reply: <none>"
+expect_match "WS20 reserved byte non-zero surfaced" "${ebus_tree}" "Reserved (byte 11): 0xff"
+expect_match "WS15 truncated payload expert warning" "${ebus_tree}" "Record payload truncated"
+expect_match "WS26 source field rendered when has_source flag set" "${ebus_tree}" "Initiator hint: 0x71"
 
 ens_tree="$(run_tshark_tree "${fixture_dir}/hlth-ens-and-kind-edge-cases.pcap")"
 ens_info="$(run_tshark_info "${fixture_dir}/hlth-ens-and-kind-edge-cases.pcap")"

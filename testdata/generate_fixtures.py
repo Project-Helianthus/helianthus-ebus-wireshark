@@ -63,6 +63,15 @@ ebus_records = [
     hex_to_bytes("48 4C 54 48 01 02 00 04 00 B5 03 00 08 00 A9 08 B5 03 01 00 C1 00"),
     # Invalid ZZ=0xAA.
     hex_to_bytes("48 4C 54 48 01 02 00 04 00 B5 03 00 08 00 71 AA B5 03 01 00 C1 00"),
+    # Primary-Secondary, ACK=0xFF (NAK) -> no reply; exercises "Reply: <none>".
+    hex_to_bytes("48 4C 54 48 01 02 00 04 00 B5 24 00 08 00 71 15 B5 24 01 02 D1 FF"),
+    # has_source=1 with a non-zero source byte (exercises WS26 flag gating).
+    hex_to_bytes("48 4C 54 48 01 02 00 05 71 B5 24 00 08 00 71 10 B5 24 01 02 D1 00"),
+    # reserved_byte11=0xFF with empty payload (exercises WS20 expert note).
+    hex_to_bytes("48 4C 54 48 01 02 00 00 00 00 00 FF 00 00"),
+    # Declared raw_length=0x20 but only 4 payload bytes present (exercises the
+    # WS15 truncated-payload guard).
+    hex_to_bytes("48 4C 54 48 01 02 00 04 00 B5 24 00 20 00 71 15 B5 24"),
 ]
 
 # Fixture 2: ENS + record-kind edge cases.
