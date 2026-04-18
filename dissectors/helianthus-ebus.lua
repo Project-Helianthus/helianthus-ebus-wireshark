@@ -17,18 +17,25 @@ plugin.record_flags = {
   sync_terminated = 0x04,
 }
 
-local function band(a, b)
-  if bit32 ~= nil then
-    return bit32.band(a, b)
+-- Wireshark's embedded Lua is 5.2 (with bit32) on Ubuntu 24.04 wireshark-common
+-- 4.2.x and 5.3+ (native bitwise operators, no bit32) on 4.4+. Resolve the
+-- helpers at load time without parsing 5.3-only syntax so the dissector loads
+-- on both interpreters.
+local band, lshift, rshift
+if bit32 ~= nil then
+  band = bit32.band
+  lshift = bit32.lshift
+  rshift = bit32.rshift
+else
+  local native_ops, err = load(
+    "return function(a,b) return a & b end, " ..
+    "function(a,b) return a << b end, " ..
+    "function(a,b) return a >> b end"
+  )
+  if native_ops == nil then
+    error("helianthus-ebus: no bit32 and native bitwise load failed: " .. tostring(err))
   end
-  return a & b
-end
-
-local function lshift(a, b)
-  if bit32 ~= nil then
-    return bit32.lshift(a, b)
-  end
-  return a << b
+  band, lshift, rshift = native_ops()
 end
 
 plugin.semantic_ebus_opcodes = {
@@ -176,7 +183,7 @@ function plugin.transaction_type(qq, zz)
   local function initiator_part(bits)
     return bits == 0x0 or bits == 0x1 or bits == 0x3 or bits == 0x7 or bits == 0xF
   end
-  if initiator_part(zz & 0x0F) and initiator_part((zz >> 4) & 0x0F) then
+  if initiator_part(band(zz, 0x0F)) and initiator_part(band(rshift(zz, 4), 0x0F)) then
     return "Primary-Primary"
   end
   return "Primary-Secondary"
