@@ -347,6 +347,10 @@ function proto.dissector(buffer, pinfo, tree)
   subtree:add(fields.payload, raw_tvb)
 
   if kind == plugin.RECORD_KIND_ENS_EVENT then
+    -- TODO(extcap-ws23): helianthus-ebus-extcap live.go currently folds
+    -- ens-events/both streams into StreamEbusFrames, so this branch is
+    -- only exercised by synthetic fixtures in testdata/. Remove this
+    -- note once the extcap writer emits RECORD_KIND_ENS_EVENT records.
     pinfo.cols.src = ""
     pinfo.cols.dst = ""
     pinfo.cols.protocol = "HLTH-ENS"
