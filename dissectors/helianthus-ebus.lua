@@ -105,10 +105,15 @@ function plugin.is_supported(opcode)
     or plugin.semantic_ebus_opcodes[opcode] ~= nil
 end
 
-function plugin.command_name(command)
+function plugin.command_name(command, request_like)
+  if command == 0x01 then
+    if request_like then
+      return "send"
+    end
+    return "received"
+  end
   local names = {
     [0x00] = "resetted",
-    [0x01] = "received",
     [0x02] = "started",
     [0x03] = "info",
     [0x0A] = "failed",
@@ -310,7 +315,10 @@ function proto.dissector(buffer, pinfo, tree)
   subtree:add(fields.record_version, buffer(4, 1))
   subtree:add(fields.stream_kind, plugin.stream_kind_name(kind))
   subtree:add(fields.command, buffer(6, 1))
-  subtree:add(fields.command_name, plugin.command_name(command))
+  subtree:add(
+    fields.command_name,
+    plugin.command_name(command, band(flags, plugin.record_flags.request_like) ~= 0)
+  )
   subtree:add(fields.flags, buffer(7, 1))
   subtree:add(fields.has_source, buffer(7, 1))
   subtree:add(fields.request_like, buffer(7, 1))
@@ -341,7 +349,18 @@ function proto.dissector(buffer, pinfo, tree)
     pinfo.cols.src = ""
     pinfo.cols.dst = ""
     pinfo.cols.protocol = "HLTH-ENS"
-    pinfo.cols.info = string.format("ENS %s data=0x%02X", plugin.command_name(command), raw_length > 0 and raw_tvb(0, 1):uint() or 0)
+    local request_like = band(flags, plugin.record_flags.request_like) ~= 0
+    local info_data
+    if raw_length == 0 then
+      info_data = "no data"
+    else
+      info_data = string.format("data=0x%02X", raw_tvb(0, 1):uint())
+    end
+    pinfo.cols.info = string.format(
+      "ENS %s %s",
+      plugin.command_name(command, request_like),
+      info_data
+    )
     return
   end
 
