@@ -136,14 +136,65 @@ function plugin.family_guess(opcode)
   return "ebus-semantic"
 end
 
-function plugin.frame_type(flags, raw_len)
-  if band(flags, plugin.record_flags.request_like) ~= 0 then
-    return "request"
+function plugin.transaction_type(zz)
+  if zz == 0xFE then
+    return "Broadcast"
   end
-  if raw_len == 1 then
-    return "ack-nack"
+  local function initiator_part(bits)
+    return bits == 0x0 or bits == 0x1 or bits == 0x3 or bits == 0x7 or bits == 0xF
   end
-  return "response-or-broadcast"
+  if initiator_part(zz & 0x0F) and initiator_part((zz >> 4) & 0x0F) then
+    return "Master-Master"
+  end
+  return "Master-Slave"
+end
+
+function plugin.parse_master_slave_segments(raw_tvb)
+  local raw_length = raw_tvb:len()
+  if raw_length < 7 then
+    return nil, "master-slave transaction too short"
+  end
+
+  local request_length = raw_tvb(4, 1):uint()
+  local request_crc_offset = 5 + request_length
+  local request_ack_offset = request_crc_offset + 1
+  if request_ack_offset >= raw_length then
+    return nil, "request segment truncated"
+  end
+
+  local request = {
+    offset = 0,
+    header_length = 5,
+    length_offset = 4,
+    length = request_length,
+    data_offset = 5,
+    crc_offset = request_crc_offset,
+    ack_offset = request_ack_offset,
+  }
+
+  local reply = nil
+  local reply_offset = request_ack_offset + 1
+  if reply_offset < raw_length and raw_tvb(request_ack_offset, 1):uint() == 0x00 then
+    local reply_length = raw_tvb(reply_offset, 1):uint()
+    local reply_crc_offset = reply_offset + 1 + reply_length
+    local reply_ack_offset = reply_crc_offset + 1
+    if reply_ack_offset >= raw_length then
+      return nil, "reply segment truncated"
+    end
+    reply = {
+      offset = reply_offset,
+      length_offset = reply_offset,
+      length = reply_length,
+      data_offset = reply_offset + 1,
+      crc_offset = reply_crc_offset,
+      ack_offset = reply_ack_offset,
+    }
+  end
+
+  return {
+    request = request,
+    reply = reply,
+  }
 end
 
 if type(Proto) ~= "table" or type(ProtoField) ~= "table" then
@@ -173,6 +224,16 @@ local fields = {
   frame_type = ProtoField.string("helianthus_ebus.frame_type", "Frame type"),
   raw_length = ProtoField.uint16("helianthus_ebus.raw_length", "Raw length", base.DEC),
   payload = ProtoField.bytes("helianthus_ebus.payload", "Raw payload"),
+  request = ProtoField.string("helianthus_ebus.request", "Request"),
+  request_length = ProtoField.uint8("helianthus_ebus.request.length", "Request length", base.DEC),
+  request_data = ProtoField.bytes("helianthus_ebus.request.data", "Request data"),
+  request_crc = ProtoField.uint8("helianthus_ebus.request.crc", "Request CRC", base.HEX),
+  request_ack = ProtoField.uint8("helianthus_ebus.request.ack", "Request ACK", base.HEX),
+  reply = ProtoField.string("helianthus_ebus.reply", "Reply"),
+  reply_length = ProtoField.uint8("helianthus_ebus.reply.length", "Reply length", base.DEC),
+  reply_data = ProtoField.bytes("helianthus_ebus.reply.data", "Reply data"),
+  reply_crc = ProtoField.uint8("helianthus_ebus.reply.crc", "Reply CRC", base.HEX),
+  reply_ack = ProtoField.uint8("helianthus_ebus.reply.ack", "Reply ACK", base.HEX),
 }
 
 proto.fields = fields
@@ -235,6 +296,9 @@ function proto.dissector(buffer, pinfo, tree)
   subtree:add(fields.payload, raw_tvb)
 
   if kind == plugin.RECORD_KIND_ENS_EVENT then
+    pinfo.cols.src = ""
+    pinfo.cols.dst = ""
+    pinfo.cols.protocol = "HLTH-ENS"
     pinfo.cols.info = string.format("ENS %s data=0x%02X", plugin.command_name(command), raw_length > 0 and raw_tvb(0, 1):uint() or 0)
     return
   end
@@ -245,17 +309,56 @@ function proto.dissector(buffer, pinfo, tree)
   if raw_length >= 2 then
     subtree:add(fields.zz, raw_tvb(1, 1))
   end
+  local qq = raw_length >= 1 and raw_tvb(0, 1):uint() or 0
+  local zz = raw_length >= 2 and raw_tvb(1, 1):uint() or 0
   subtree:add(fields.pb, buffer(9, 1))
   subtree:add(fields.sb, buffer(10, 1))
   local opcode = lshift(pb, 8) + sb
   subtree:add(fields.opcode, buffer(9, 2))
   subtree:add(fields.opcode_label, plugin.lookup_label(opcode))
   subtree:add(fields.family, plugin.family_guess(opcode))
-  subtree:add(fields.frame_type, plugin.frame_type(flags, raw_length))
+  local transaction_type = plugin.transaction_type(zz)
+  subtree:add(fields.frame_type, transaction_type)
 
+  if transaction_type == "Master-Slave" then
+    local segments, segment_err = plugin.parse_master_slave_segments(raw_tvb)
+    if segments == nil then
+      subtree:add_expert_info(PI_MALFORMED, PI_WARN, segment_err)
+    else
+      local request = segments.request
+      local request_tree = subtree:add(
+        fields.request,
+        raw_tvb(request.offset, request.ack_offset - request.offset + 1),
+        string.format("Request (len=%d)", request.length)
+      )
+      request_tree:add(fields.request_length, raw_tvb(request.length_offset, 1))
+      request_tree:add(fields.request_data, raw_tvb(request.data_offset, request.length))
+      request_tree:add(fields.request_crc, raw_tvb(request.crc_offset, 1))
+      request_tree:add(fields.request_ack, raw_tvb(request.ack_offset, 1))
+
+      if segments.reply ~= nil then
+        local reply = segments.reply
+        local reply_tree = subtree:add(
+          fields.reply,
+          raw_tvb(reply.offset, reply.ack_offset - reply.offset + 1),
+          string.format("Reply (len=%d)", reply.length)
+        )
+        reply_tree:add(fields.reply_length, raw_tvb(reply.length_offset, 1))
+        reply_tree:add(fields.reply_data, raw_tvb(reply.data_offset, reply.length))
+        reply_tree:add(fields.reply_crc, raw_tvb(reply.crc_offset, 1))
+        reply_tree:add(fields.reply_ack, raw_tvb(reply.ack_offset, 1))
+      else
+        subtree:add(fields.reply, "Reply: <none>")
+      end
+    end
+  end
+
+  pinfo.cols.src = raw_length >= 1 and string.format("0x%02X", qq) or ""
+  pinfo.cols.dst = raw_length >= 2 and string.format("0x%02X", zz) or ""
+  pinfo.cols.protocol = string.format("%02X/%02X", pb, sb)
   local info = string.format(
     "%s opcode=0x%04X %s len=%d",
-    plugin.frame_type(flags, raw_length),
+    transaction_type,
     opcode,
     plugin.lookup_label(opcode),
     raw_length
