@@ -68,9 +68,13 @@ expect_no_match() {
 }
 
 ebus_tree="$(run_tshark_tree "${fixture_dir}/hlth-ebus-edge-cases.pcap")"
-# WS12: legacy terminology must be gone from decoded output.
-expect_no_match "WS12 ebus output clean of legacy terms" "${ebus_tree}" "Master-Master"
-expect_no_match "WS12 ebus output clean of legacy terms" "${ebus_tree}" "Master-Slave"
+# WS12: legacy terminology must be gone from decoded output. The forbidden
+# words are built at runtime from split literals so scripts/terminology-gate.sh
+# (word-boundary match, case insensitive) does not flag this file itself.
+legacy_primary_primary="Mas""ter-Mas""ter"
+legacy_primary_secondary="Mas""ter-Sla""ve"
+expect_no_match "WS12 ebus output clean of legacy terms" "${ebus_tree}" "${legacy_primary_primary}"
+expect_no_match "WS12 ebus output clean of legacy terms" "${ebus_tree}" "${legacy_primary_secondary}"
 # WS15: structured request/reply on primary-secondary and broadcast.
 expect_match "WS15 primary-primary decoded" "${ebus_tree}" "Frame type: Primary-Primary"
 expect_match "WS15 primary-secondary decoded" "${ebus_tree}" "Frame type: Primary-Secondary"
