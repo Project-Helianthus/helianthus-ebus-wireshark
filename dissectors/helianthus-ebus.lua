@@ -4,7 +4,9 @@ local plugin = {}
 
 plugin.VERSION = "0.1.0"
 plugin.LINKTYPE_USER0 = 147
-plugin.WTAP_ENCAP_USER0 = 45
+plugin.WTAP_ENCAP_USER0_FALLBACK = 45
+plugin.WTAP_ENCAP_USER0 = (type(wtap_encaps) == "table" and wtap_encaps.USER0)
+  or plugin.WTAP_ENCAP_USER0_FALLBACK
 plugin.RECORD_VERSION = 1
 plugin.RECORD_KIND_ENS_EVENT = 1
 plugin.RECORD_KIND_EBUS_FRAME = 2
@@ -15,18 +17,25 @@ plugin.record_flags = {
   sync_terminated = 0x04,
 }
 
-local function band(a, b)
-  if bit32 ~= nil then
-    return bit32.band(a, b)
+-- Wireshark's embedded Lua is 5.2 (with bit32) on Ubuntu 24.04 wireshark-common
+-- 4.2.x and 5.3+ (native bitwise operators, no bit32) on 4.4+. Resolve the
+-- helpers at load time without parsing 5.3-only syntax so the dissector loads
+-- on both interpreters.
+local band, lshift, rshift
+if bit32 ~= nil then
+  band = bit32.band
+  lshift = bit32.lshift
+  rshift = bit32.rshift
+else
+  local native_ops, err = load(
+    "return function(a,b) return a & b end, " ..
+    "function(a,b) return a << b end, " ..
+    "function(a,b) return a >> b end"
+  )
+  if native_ops == nil then
+    error("helianthus-ebus: no bit32 and native bitwise load failed: " .. tostring(err))
   end
-  return a & b
-end
-
-local function lshift(a, b)
-  if bit32 ~= nil then
-    return bit32.lshift(a, b)
-  end
-  return a << b
+  band, lshift, rshift = native_ops()
 end
 
 plugin.semantic_ebus_opcodes = {
@@ -78,7 +87,10 @@ plugin.semantic_ebus_opcodes = {
   [0xFF06] = "eBUS semantic 0xFF06",
 }
 
+-- Labels mirror helianthus-docs-ebus/protocols/vaillant/ebus-vaillant.md;
+-- any addition here must update scripts/check_opcode_catalog.lua.
 plugin.semantic_vaillant_opcodes = {
+  [0xB503] = "Vaillant B503",
   [0xB504] = "Vaillant B504",
   [0xB505] = "Vaillant B505",
   [0xB506] = "Vaillant B506",
@@ -86,8 +98,14 @@ plugin.semantic_vaillant_opcodes = {
   [0xB510] = "Vaillant B510",
   [0xB511] = "Vaillant B511",
   [0xB512] = "Vaillant B512",
+  [0xB513] = "Vaillant B513",
+  [0xB514] = "Vaillant B514",
+  [0xB515] = "Vaillant B515",
   [0xB516] = "Vaillant B516 energy",
   [0xB51A] = "Vaillant B51A",
+  [0xB521] = "Vaillant B521",
+  [0xB522] = "Vaillant B522",
+  [0xB523] = "Vaillant B523",
   [0xB524] = "Vaillant B524 extended registers",
   [0xB555] = "Vaillant B555 timer protocol",
 }
@@ -103,10 +121,19 @@ function plugin.is_supported(opcode)
     or plugin.semantic_ebus_opcodes[opcode] ~= nil
 end
 
-function plugin.command_name(command)
+function plugin.command_name(command, request_like)
+  -- Coerce strictly: only boolean true flips ENS command 0x01 to "send";
+  -- nil/false/0/"" all fall through to "received". This matches the
+  -- expected contract for the record_flags.request_like bit.
+  local is_request = request_like == true
+  if command == 0x01 then
+    if is_request then
+      return "send"
+    end
+    return "received"
+  end
   local names = {
     [0x00] = "resetted",
-    [0x01] = "received",
     [0x02] = "started",
     [0x03] = "info",
     [0x0A] = "failed",
@@ -130,20 +157,112 @@ function plugin.family_guess(opcode)
   if opcode >= 0xB500 and opcode <= 0xB5FF then
     return "vaillant-b5xx"
   end
+  -- PB=0xFF is the eBUS manufacturer-specific range per the protocol
+  -- specification; the full 0xFF00-0xFFFF window is classified here so
+  -- that future allocations beyond the 0xFF00-0xFF06 set documented in
+  -- helianthus-docs-ebus get the right family without revisiting this.
+  if opcode >= 0xFF00 and opcode <= 0xFFFF then
+    return "ebus-manufacturer"
+  end
   if opcode == 0 then
     return "unknown"
   end
   return "ebus-semantic"
 end
 
-function plugin.frame_type(flags, raw_len)
-  if band(flags, plugin.record_flags.request_like) ~= 0 then
-    return "request"
+function plugin.transaction_type(qq, zz)
+  local function invalid_address(addr)
+    return addr == 0xA9 or addr == 0xAA
   end
-  if raw_len == 1 then
-    return "ack-nack"
+  if invalid_address(qq) or invalid_address(zz) then
+    return "Invalid"
   end
-  return "response-or-broadcast"
+  if zz == 0xFE then
+    return "Broadcast"
+  end
+  local function initiator_part(bits)
+    return bits == 0x0 or bits == 0x1 or bits == 0x3 or bits == 0x7 or bits == 0xF
+  end
+  if initiator_part(band(zz, 0x0F)) and initiator_part(band(rshift(zz, 4), 0x0F)) then
+    return "Primary-Primary"
+  end
+  return "Primary-Secondary"
+end
+
+function plugin.parse_primary_secondary_segments(raw_tvb)
+  -- Shared between Primary-Secondary and Primary-Primary transactions; the
+  -- layout is identical up to the request ACK. Error messages therefore use
+  -- "primary transaction" to cover both cases.
+  local raw_length = raw_tvb:len()
+  if raw_length < 7 then
+    return nil, "primary transaction too short"
+  end
+
+  local request_length = raw_tvb(4, 1):uint()
+  local request_crc_offset = 5 + request_length
+  local request_ack_offset = request_crc_offset + 1
+  if request_ack_offset >= raw_length then
+    return nil, "request segment truncated"
+  end
+
+  local request = {
+    offset = 0,
+    header_length = 5,
+    length_offset = 4,
+    length = request_length,
+    data_offset = 5,
+    crc_offset = request_crc_offset,
+    ack_offset = request_ack_offset,
+  }
+
+  local reply = nil
+  local reply_offset = request_ack_offset + 1
+  if reply_offset < raw_length and raw_tvb(request_ack_offset, 1):uint() == 0x00 then
+    local reply_length = raw_tvb(reply_offset, 1):uint()
+    local reply_crc_offset = reply_offset + 1 + reply_length
+    local reply_ack_offset = reply_crc_offset + 1
+    if reply_ack_offset >= raw_length then
+      return nil, "reply segment truncated"
+    end
+    reply = {
+      offset = reply_offset,
+      length_offset = reply_offset,
+      length = reply_length,
+      data_offset = reply_offset + 1,
+      crc_offset = reply_crc_offset,
+      ack_offset = reply_ack_offset,
+    }
+  end
+
+  return {
+    request = request,
+    reply = reply,
+  }
+end
+
+function plugin.parse_broadcast_segments(raw_tvb)
+  local raw_length = raw_tvb:len()
+  if raw_length < 6 then
+    return nil, "broadcast transaction too short"
+  end
+
+  local request_length = raw_tvb(4, 1):uint()
+  local request_crc_offset = 5 + request_length
+  if request_crc_offset >= raw_length then
+    return nil, "broadcast request truncated"
+  end
+
+  return {
+    request = {
+      offset = 0,
+      header_length = 5,
+      length_offset = 4,
+      length = request_length,
+      data_offset = 5,
+      crc_offset = request_crc_offset,
+    },
+    reply = nil,
+  }
 end
 
 if type(Proto) ~= "table" or type(ProtoField) ~= "table" then
@@ -171,8 +290,19 @@ local fields = {
   opcode_label = ProtoField.string("helianthus_ebus.opcode_label", "Opcode label"),
   family = ProtoField.string("helianthus_ebus.family", "Family"),
   frame_type = ProtoField.string("helianthus_ebus.frame_type", "Frame type"),
+  reserved_byte11 = ProtoField.uint8("helianthus_ebus.reserved_byte11", "Reserved (byte 11)", base.HEX),
   raw_length = ProtoField.uint16("helianthus_ebus.raw_length", "Raw length", base.DEC),
   payload = ProtoField.bytes("helianthus_ebus.payload", "Raw payload"),
+  request = ProtoField.string("helianthus_ebus.request", "Request"),
+  request_length = ProtoField.uint8("helianthus_ebus.request.length", "Request length", base.DEC),
+  request_data = ProtoField.bytes("helianthus_ebus.request.data", "Request data"),
+  request_crc = ProtoField.uint8("helianthus_ebus.request.crc", "Request CRC", base.HEX),
+  request_ack = ProtoField.uint8("helianthus_ebus.request.ack", "Request ACK", base.HEX),
+  reply = ProtoField.string("helianthus_ebus.reply", "Reply"),
+  reply_length = ProtoField.uint8("helianthus_ebus.reply.length", "Reply length", base.DEC),
+  reply_data = ProtoField.bytes("helianthus_ebus.reply.data", "Reply data"),
+  reply_crc = ProtoField.uint8("helianthus_ebus.reply.crc", "Reply CRC", base.HEX),
+  reply_ack = ProtoField.uint8("helianthus_ebus.reply.ack", "Reply ACK", base.HEX),
 }
 
 proto.fields = fields
@@ -205,20 +335,29 @@ function proto.dissector(buffer, pinfo, tree)
   local source = buffer(8, 1):uint()
   local pb = buffer(9, 1):uint()
   local sb = buffer(10, 1):uint()
+  local reserved_byte11 = buffer(11, 1):uint()
   local raw_length = buffer(12, 1):uint() + lshift(buffer(13, 1):uint(), 8)
   local payload_offset = 14
+
+  local request_like = band(flags, plugin.record_flags.request_like) ~= 0
 
   subtree:add(fields.record_version, buffer(4, 1))
   subtree:add(fields.stream_kind, plugin.stream_kind_name(kind))
   subtree:add(fields.command, buffer(6, 1))
-  subtree:add(fields.command_name, plugin.command_name(command))
+  if kind == plugin.RECORD_KIND_ENS_EVENT then
+    subtree:add(fields.command_name, plugin.command_name(command, request_like))
+  end
   subtree:add(fields.flags, buffer(7, 1))
   subtree:add(fields.has_source, buffer(7, 1))
   subtree:add(fields.request_like, buffer(7, 1))
   subtree:add(fields.sync_terminated, buffer(7, 1))
-  subtree:add(fields.raw_length, raw_length)
+  subtree:add(fields.reserved_byte11, buffer(11, 1))
+  if reserved_byte11 ~= 0 then
+    subtree:add_expert_info(PI_PROTOCOL, PI_NOTE, "Reserved byte 11 non-zero")
+  end
+  subtree:add(fields.raw_length, buffer(12, 2), raw_length)
 
-  if source ~= 0 or band(flags, plugin.record_flags.has_source) ~= 0 then
+  if band(flags, plugin.record_flags.has_source) ~= 0 then
     subtree:add(fields.source, buffer(8, 1))
   end
 
@@ -235,7 +374,30 @@ function proto.dissector(buffer, pinfo, tree)
   subtree:add(fields.payload, raw_tvb)
 
   if kind == plugin.RECORD_KIND_ENS_EVENT then
-    pinfo.cols.info = string.format("ENS %s data=0x%02X", plugin.command_name(command), raw_length > 0 and raw_tvb(0, 1):uint() or 0)
+    -- TODO(extcap-ws23): helianthus-ebus-extcap live.go currently folds
+    -- ens-events/both streams into StreamEbusFrames, so this branch is
+    -- only exercised by synthetic fixtures in testdata/. Remove this
+    -- note once the extcap writer emits RECORD_KIND_ENS_EVENT records.
+    pinfo.cols.src = ""
+    pinfo.cols.dst = ""
+    pinfo.cols.protocol = "HLTH-ENS"
+    local info_data
+    if raw_length == 0 then
+      info_data = "no data"
+    else
+      info_data = string.format("data=0x%02X", raw_tvb(0, 1):uint())
+    end
+    pinfo.cols.info = string.format(
+      "ENS %s %s",
+      plugin.command_name(command, request_like),
+      info_data
+    )
+    return
+  end
+
+  if kind ~= plugin.RECORD_KIND_EBUS_FRAME then
+    pinfo.cols.info = string.format("Unsupported record kind=%d", kind)
+    subtree:add_expert_info(PI_PROTOCOL, PI_WARN, "Unsupported record kind")
     return
   end
 
@@ -245,17 +407,78 @@ function proto.dissector(buffer, pinfo, tree)
   if raw_length >= 2 then
     subtree:add(fields.zz, raw_tvb(1, 1))
   end
+  local qq = raw_length >= 1 and raw_tvb(0, 1):uint() or 0
+  local zz = raw_length >= 2 and raw_tvb(1, 1):uint() or 0
   subtree:add(fields.pb, buffer(9, 1))
   subtree:add(fields.sb, buffer(10, 1))
   local opcode = lshift(pb, 8) + sb
   subtree:add(fields.opcode, buffer(9, 2))
   subtree:add(fields.opcode_label, plugin.lookup_label(opcode))
   subtree:add(fields.family, plugin.family_guess(opcode))
-  subtree:add(fields.frame_type, plugin.frame_type(flags, raw_length))
+  local transaction_type
+  if raw_length < 2 then
+    -- Without QQ and ZZ the frame type cannot be inferred; defaulting qq/zz
+    -- to 0 would mislabel the frame as Primary-Primary and trigger irrelevant
+    -- segment warnings.
+    transaction_type = "Truncated"
+    subtree:add(fields.frame_type, transaction_type)
+    subtree:add_expert_info(PI_MALFORMED, PI_WARN, "eBUS frame truncated: missing QQ/ZZ")
+  else
+    transaction_type = plugin.transaction_type(qq, zz)
+    subtree:add(fields.frame_type, transaction_type)
+    if transaction_type == "Invalid" then
+      subtree:add_expert_info(PI_MALFORMED, PI_WARN, "Invalid eBUS address (0xA9/0xAA)")
+    end
+  end
 
+  local segments, segment_err
+  if transaction_type == "Primary-Secondary" or transaction_type == "Primary-Primary" then
+    segments, segment_err = plugin.parse_primary_secondary_segments(raw_tvb)
+  elseif transaction_type == "Broadcast" then
+    segments, segment_err = plugin.parse_broadcast_segments(raw_tvb)
+  end
+
+  if segment_err ~= nil then
+    subtree:add_expert_info(PI_MALFORMED, PI_WARN, segment_err)
+  elseif segments ~= nil then
+    local request = segments.request
+    local request_end = request.ack_offset or request.crc_offset
+    local request_tree = subtree:add(
+      fields.request,
+      raw_tvb(request.offset, request_end - request.offset + 1),
+      string.format("Request (len=%d)", request.length)
+    )
+    request_tree:add(fields.request_length, raw_tvb(request.length_offset, 1))
+    request_tree:add(fields.request_data, raw_tvb(request.data_offset, request.length))
+    request_tree:add(fields.request_crc, raw_tvb(request.crc_offset, 1))
+    if request.ack_offset ~= nil then
+      request_tree:add(fields.request_ack, raw_tvb(request.ack_offset, 1))
+    end
+
+    if segments.reply ~= nil then
+      local reply = segments.reply
+      local reply_tree = subtree:add(
+        fields.reply,
+        raw_tvb(reply.offset, reply.ack_offset - reply.offset + 1),
+        string.format("Reply (len=%d)", reply.length)
+      )
+      reply_tree:add(fields.reply_length, raw_tvb(reply.length_offset, 1))
+      reply_tree:add(fields.reply_data, raw_tvb(reply.data_offset, reply.length))
+      reply_tree:add(fields.reply_crc, raw_tvb(reply.crc_offset, 1))
+      reply_tree:add(fields.reply_ack, raw_tvb(reply.ack_offset, 1))
+    elseif transaction_type == "Primary-Secondary" then
+      -- The ProtoField label ("Reply") is prepended automatically, so pass
+      -- only "<none>"; the rendered line is still "Reply: <none>".
+      subtree:add(fields.reply, "<none>")
+    end
+  end
+
+  pinfo.cols.src = raw_length >= 1 and string.format("0x%02X", qq) or ""
+  pinfo.cols.dst = raw_length >= 2 and string.format("0x%02X", zz) or ""
+  pinfo.cols.protocol = string.format("%02X/%02X", pb, sb)
   local info = string.format(
     "%s opcode=0x%04X %s len=%d",
-    plugin.frame_type(flags, raw_length),
+    transaction_type,
     opcode,
     plugin.lookup_label(opcode),
     raw_length
