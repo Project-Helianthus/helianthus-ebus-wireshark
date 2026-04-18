@@ -222,6 +222,7 @@ local fields = {
   opcode_label = ProtoField.string("helianthus_ebus.opcode_label", "Opcode label"),
   family = ProtoField.string("helianthus_ebus.family", "Family"),
   frame_type = ProtoField.string("helianthus_ebus.frame_type", "Frame type"),
+  reserved_byte11 = ProtoField.uint8("helianthus_ebus.reserved_byte11", "Reserved (byte 11)", base.HEX),
   raw_length = ProtoField.uint16("helianthus_ebus.raw_length", "Raw length", base.DEC),
   payload = ProtoField.bytes("helianthus_ebus.payload", "Raw payload"),
   request = ProtoField.string("helianthus_ebus.request", "Request"),
@@ -266,6 +267,7 @@ function proto.dissector(buffer, pinfo, tree)
   local source = buffer(8, 1):uint()
   local pb = buffer(9, 1):uint()
   local sb = buffer(10, 1):uint()
+  local reserved_byte11 = buffer(11, 1):uint()
   local raw_length = buffer(12, 1):uint() + lshift(buffer(13, 1):uint(), 8)
   local payload_offset = 14
 
@@ -277,9 +279,13 @@ function proto.dissector(buffer, pinfo, tree)
   subtree:add(fields.has_source, buffer(7, 1))
   subtree:add(fields.request_like, buffer(7, 1))
   subtree:add(fields.sync_terminated, buffer(7, 1))
-  subtree:add(fields.raw_length, raw_length)
+  subtree:add(fields.reserved_byte11, buffer(11, 1))
+  if reserved_byte11 ~= 0 then
+    subtree:add_expert_info(PI_PROTOCOL, PI_NOTE, "Reserved byte 11 non-zero")
+  end
+  subtree:add(fields.raw_length, buffer(12, 2), raw_length)
 
-  if source ~= 0 or band(flags, plugin.record_flags.has_source) ~= 0 then
+  if band(flags, plugin.record_flags.has_source) ~= 0 then
     subtree:add(fields.source, buffer(8, 1))
   end
 
