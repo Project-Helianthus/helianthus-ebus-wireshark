@@ -17,3 +17,7 @@ if [[ -z "${lua_bin}" ]]; then
 fi
 
 "${lua_bin}" ./scripts/check_opcode_catalog.lua
+
+if [[ -x ./scripts/dissector_integration_test.sh ]]; then
+  ./scripts/dissector_integration_test.sh
+fi
