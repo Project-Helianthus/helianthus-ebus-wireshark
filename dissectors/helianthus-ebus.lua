@@ -312,13 +312,14 @@ function proto.dissector(buffer, pinfo, tree)
   local raw_length = buffer(12, 1):uint() + lshift(buffer(13, 1):uint(), 8)
   local payload_offset = 14
 
+  local request_like = band(flags, plugin.record_flags.request_like) ~= 0
+
   subtree:add(fields.record_version, buffer(4, 1))
   subtree:add(fields.stream_kind, plugin.stream_kind_name(kind))
   subtree:add(fields.command, buffer(6, 1))
-  subtree:add(
-    fields.command_name,
-    plugin.command_name(command, band(flags, plugin.record_flags.request_like) ~= 0)
-  )
+  if kind == plugin.RECORD_KIND_ENS_EVENT then
+    subtree:add(fields.command_name, plugin.command_name(command, request_like))
+  end
   subtree:add(fields.flags, buffer(7, 1))
   subtree:add(fields.has_source, buffer(7, 1))
   subtree:add(fields.request_like, buffer(7, 1))
@@ -349,7 +350,6 @@ function proto.dissector(buffer, pinfo, tree)
     pinfo.cols.src = ""
     pinfo.cols.dst = ""
     pinfo.cols.protocol = "HLTH-ENS"
-    local request_like = band(flags, plugin.record_flags.request_like) ~= 0
     local info_data
     if raw_length == 0 then
       info_data = "no data"
@@ -361,6 +361,12 @@ function proto.dissector(buffer, pinfo, tree)
       plugin.command_name(command, request_like),
       info_data
     )
+    return
+  end
+
+  if kind ~= plugin.RECORD_KIND_EBUS_FRAME then
+    pinfo.cols.info = string.format("Unsupported record kind=%d", kind)
+    subtree:add_expert_info(PI_PROTOCOL, PI_WARN, "Unsupported record kind")
     return
   end
 
