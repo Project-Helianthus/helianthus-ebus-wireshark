@@ -132,6 +132,9 @@ function plugin.family_guess(opcode)
   if opcode >= 0xB500 and opcode <= 0xB5FF then
     return "vaillant-b5xx"
   end
+  if opcode >= 0xFF00 and opcode <= 0xFFFF then
+    return "ebus-manufacturer"
+  end
   if opcode == 0 then
     return "unknown"
   end
