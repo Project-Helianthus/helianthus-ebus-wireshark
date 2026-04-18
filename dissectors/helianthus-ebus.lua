@@ -208,6 +208,31 @@ function plugin.parse_primary_secondary_segments(raw_tvb)
   }
 end
 
+function plugin.parse_broadcast_segments(raw_tvb)
+  local raw_length = raw_tvb:len()
+  if raw_length < 6 then
+    return nil, "broadcast transaction too short"
+  end
+
+  local request_length = raw_tvb(4, 1):uint()
+  local request_crc_offset = 5 + request_length
+  if request_crc_offset >= raw_length then
+    return nil, "broadcast request truncated"
+  end
+
+  return {
+    request = {
+      offset = 0,
+      header_length = 5,
+      length_offset = 4,
+      length = request_length,
+      data_offset = 5,
+      crc_offset = request_crc_offset,
+    },
+    reply = nil,
+  }
+end
+
 if type(Proto) ~= "table" or type(ProtoField) ~= "table" then
   return plugin
 end
@@ -340,36 +365,43 @@ function proto.dissector(buffer, pinfo, tree)
     subtree:add_expert_info(PI_MALFORMED, PI_WARN, "Invalid eBUS address (0xA9/0xAA)")
   end
 
-  if transaction_type == "Primary-Secondary" then
-    local segments, segment_err = plugin.parse_primary_secondary_segments(raw_tvb)
-    if segments == nil then
-      subtree:add_expert_info(PI_MALFORMED, PI_WARN, segment_err)
-    else
-      local request = segments.request
-      local request_tree = subtree:add(
-        fields.request,
-        raw_tvb(request.offset, request.ack_offset - request.offset + 1),
-        string.format("Request (len=%d)", request.length)
-      )
-      request_tree:add(fields.request_length, raw_tvb(request.length_offset, 1))
-      request_tree:add(fields.request_data, raw_tvb(request.data_offset, request.length))
-      request_tree:add(fields.request_crc, raw_tvb(request.crc_offset, 1))
-      request_tree:add(fields.request_ack, raw_tvb(request.ack_offset, 1))
+  local segments, segment_err
+  if transaction_type == "Primary-Secondary" or transaction_type == "Primary-Primary" then
+    segments, segment_err = plugin.parse_primary_secondary_segments(raw_tvb)
+  elseif transaction_type == "Broadcast" then
+    segments, segment_err = plugin.parse_broadcast_segments(raw_tvb)
+  end
 
-      if segments.reply ~= nil then
-        local reply = segments.reply
-        local reply_tree = subtree:add(
-          fields.reply,
-          raw_tvb(reply.offset, reply.ack_offset - reply.offset + 1),
-          string.format("Reply (len=%d)", reply.length)
-        )
-        reply_tree:add(fields.reply_length, raw_tvb(reply.length_offset, 1))
-        reply_tree:add(fields.reply_data, raw_tvb(reply.data_offset, reply.length))
-        reply_tree:add(fields.reply_crc, raw_tvb(reply.crc_offset, 1))
-        reply_tree:add(fields.reply_ack, raw_tvb(reply.ack_offset, 1))
-      else
-        subtree:add(fields.reply, "Reply: <none>")
-      end
+  if segment_err ~= nil then
+    subtree:add_expert_info(PI_MALFORMED, PI_WARN, segment_err)
+  elseif segments ~= nil then
+    local request = segments.request
+    local request_end = request.ack_offset or request.crc_offset
+    local request_tree = subtree:add(
+      fields.request,
+      raw_tvb(request.offset, request_end - request.offset + 1),
+      string.format("Request (len=%d)", request.length)
+    )
+    request_tree:add(fields.request_length, raw_tvb(request.length_offset, 1))
+    request_tree:add(fields.request_data, raw_tvb(request.data_offset, request.length))
+    request_tree:add(fields.request_crc, raw_tvb(request.crc_offset, 1))
+    if request.ack_offset ~= nil then
+      request_tree:add(fields.request_ack, raw_tvb(request.ack_offset, 1))
+    end
+
+    if segments.reply ~= nil then
+      local reply = segments.reply
+      local reply_tree = subtree:add(
+        fields.reply,
+        raw_tvb(reply.offset, reply.ack_offset - reply.offset + 1),
+        string.format("Reply (len=%d)", reply.length)
+      )
+      reply_tree:add(fields.reply_length, raw_tvb(reply.length_offset, 1))
+      reply_tree:add(fields.reply_data, raw_tvb(reply.data_offset, reply.length))
+      reply_tree:add(fields.reply_crc, raw_tvb(reply.crc_offset, 1))
+      reply_tree:add(fields.reply_ack, raw_tvb(reply.ack_offset, 1))
+    elseif transaction_type == "Primary-Secondary" then
+      subtree:add(fields.reply, "Reply: <none>")
     end
   end
 
