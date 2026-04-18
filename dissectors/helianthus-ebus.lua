@@ -190,9 +190,12 @@ function plugin.transaction_type(qq, zz)
 end
 
 function plugin.parse_primary_secondary_segments(raw_tvb)
+  -- Shared between Primary-Secondary and Primary-Primary transactions; the
+  -- layout is identical up to the request ACK. Error messages therefore use
+  -- "primary transaction" to cover both cases.
   local raw_length = raw_tvb:len()
   if raw_length < 7 then
-    return nil, "primary-secondary transaction too short"
+    return nil, "primary transaction too short"
   end
 
   local request_length = raw_tvb(4, 1):uint()
@@ -412,10 +415,20 @@ function proto.dissector(buffer, pinfo, tree)
   subtree:add(fields.opcode, buffer(9, 2))
   subtree:add(fields.opcode_label, plugin.lookup_label(opcode))
   subtree:add(fields.family, plugin.family_guess(opcode))
-  local transaction_type = plugin.transaction_type(qq, zz)
-  subtree:add(fields.frame_type, transaction_type)
-  if transaction_type == "Invalid" then
-    subtree:add_expert_info(PI_MALFORMED, PI_WARN, "Invalid eBUS address (0xA9/0xAA)")
+  local transaction_type
+  if raw_length < 2 then
+    -- Without QQ and ZZ the frame type cannot be inferred; defaulting qq/zz
+    -- to 0 would mislabel the frame as Primary-Primary and trigger irrelevant
+    -- segment warnings.
+    transaction_type = "Truncated"
+    subtree:add(fields.frame_type, transaction_type)
+    subtree:add_expert_info(PI_MALFORMED, PI_WARN, "eBUS frame truncated: missing QQ/ZZ")
+  else
+    transaction_type = plugin.transaction_type(qq, zz)
+    subtree:add(fields.frame_type, transaction_type)
+    if transaction_type == "Invalid" then
+      subtree:add_expert_info(PI_MALFORMED, PI_WARN, "Invalid eBUS address (0xA9/0xAA)")
+    end
   end
 
   local segments, segment_err
@@ -454,7 +467,9 @@ function proto.dissector(buffer, pinfo, tree)
       reply_tree:add(fields.reply_crc, raw_tvb(reply.crc_offset, 1))
       reply_tree:add(fields.reply_ack, raw_tvb(reply.ack_offset, 1))
     elseif transaction_type == "Primary-Secondary" then
-      subtree:add(fields.reply, "Reply: <none>")
+      -- The ProtoField label ("Reply") is prepended automatically, so pass
+      -- only "<none>"; the rendered line is still "Reply: <none>".
+      subtree:add(fields.reply, "<none>")
     end
   end
 
