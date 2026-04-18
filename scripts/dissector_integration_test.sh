@@ -5,6 +5,8 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${here}/.." && pwd)"
 cd "${repo_root}"
 
+echo "[integration] $(tshark --version 2>/dev/null | head -1 || echo 'tshark not found')"
+
 if ! command -v tshark >/dev/null 2>&1; then
   if [[ "${CI:-}" == "true" || "${TSHARK_REQUIRED:-0}" == "1" ]]; then
     echo "FAIL: tshark not found in PATH; CI must install wireshark-common before running integration tests" >&2
@@ -38,7 +40,17 @@ user_dlts_pref='uat:user_dlts:"User 0 (DLT=147)","helianthus_ebus","0","","0",""
 
 run_tshark_tree() {
   local fixture="$1"
-  tshark -r "${fixture}" -O helianthus_ebus -o "${user_dlts_pref}" 2>/dev/null
+  local stderr_file
+  stderr_file="$(mktemp)"
+  local out
+  if ! out="$(tshark -r "${fixture}" -O helianthus_ebus -o "${user_dlts_pref}" 2>"${stderr_file}")"; then
+    echo "tshark failed on ${fixture}; stderr:" >&2
+    cat "${stderr_file}" >&2
+    rm -f "${stderr_file}"
+    return 1
+  fi
+  rm -f "${stderr_file}"
+  printf '%s' "${out}"
 }
 
 run_tshark_info() {
