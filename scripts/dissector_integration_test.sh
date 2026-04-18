@@ -31,14 +31,19 @@ if [[ ! -s "${fixture_dir}/hlth-ebus-edge-cases.pcap" ]] \
   python3 "${fixture_dir}/generate_fixtures.py"
 fi
 
+# user_dlts routes LINKTYPE_USER0 (DLT=147) through the helianthus_ebus
+# dissector even on fresh Wireshark installs (e.g. CI) that ship without a
+# preconfigured user_dlts UAT entry.
+user_dlts_pref='uat:user_dlts:"User 0 (DLT=147)","helianthus_ebus","0","","0",""'
+
 run_tshark_tree() {
   local fixture="$1"
-  tshark -r "${fixture}" -O helianthus_ebus 2>/dev/null
+  tshark -r "${fixture}" -O helianthus_ebus -o "${user_dlts_pref}" 2>/dev/null
 }
 
 run_tshark_info() {
   local fixture="$1"
-  tshark -r "${fixture}" -T fields -e _ws.col.Info 2>/dev/null
+  tshark -r "${fixture}" -T fields -e _ws.col.Info -o "${user_dlts_pref}" 2>/dev/null
 }
 
 expect_match() {
