@@ -4,7 +4,9 @@ local plugin = {}
 
 plugin.VERSION = "0.1.0"
 plugin.LINKTYPE_USER0 = 147
-plugin.WTAP_ENCAP_USER0 = 45
+plugin.WTAP_ENCAP_USER0_FALLBACK = 45
+plugin.WTAP_ENCAP_USER0 = (type(wtap_encaps) == "table" and wtap_encaps.USER0)
+  or plugin.WTAP_ENCAP_USER0_FALLBACK
 plugin.RECORD_VERSION = 1
 plugin.RECORD_KIND_ENS_EVENT = 1
 plugin.RECORD_KIND_EBUS_FRAME = 2
