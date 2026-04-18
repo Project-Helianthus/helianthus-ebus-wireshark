@@ -115,8 +115,12 @@ function plugin.is_supported(opcode)
 end
 
 function plugin.command_name(command, request_like)
+  -- Coerce strictly: only boolean true flips ENS command 0x01 to "send";
+  -- nil/false/0/"" all fall through to "received". This matches the
+  -- expected contract for the record_flags.request_like bit.
+  local is_request = request_like == true
   if command == 0x01 then
-    if request_like then
+    if is_request then
       return "send"
     end
     return "received"
@@ -146,6 +150,10 @@ function plugin.family_guess(opcode)
   if opcode >= 0xB500 and opcode <= 0xB5FF then
     return "vaillant-b5xx"
   end
+  -- PB=0xFF is the eBUS manufacturer-specific range per the protocol
+  -- specification; the full 0xFF00-0xFFFF window is classified here so
+  -- that future allocations beyond the 0xFF00-0xFF06 set documented in
+  -- helianthus-docs-ebus get the right family without revisiting this.
   if opcode >= 0xFF00 and opcode <= 0xFFFF then
     return "ebus-manufacturer"
   end
