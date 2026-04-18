@@ -80,7 +80,10 @@ plugin.semantic_ebus_opcodes = {
   [0xFF06] = "eBUS semantic 0xFF06",
 }
 
+-- Labels mirror helianthus-docs-ebus/protocols/vaillant/ebus-vaillant.md;
+-- any addition here must update scripts/check_opcode_catalog.lua.
 plugin.semantic_vaillant_opcodes = {
+  [0xB503] = "Vaillant B503",
   [0xB504] = "Vaillant B504",
   [0xB505] = "Vaillant B505",
   [0xB506] = "Vaillant B506",
@@ -88,8 +91,14 @@ plugin.semantic_vaillant_opcodes = {
   [0xB510] = "Vaillant B510",
   [0xB511] = "Vaillant B511",
   [0xB512] = "Vaillant B512",
+  [0xB513] = "Vaillant B513",
+  [0xB514] = "Vaillant B514",
+  [0xB515] = "Vaillant B515",
   [0xB516] = "Vaillant B516 energy",
   [0xB51A] = "Vaillant B51A",
+  [0xB521] = "Vaillant B521",
+  [0xB522] = "Vaillant B522",
+  [0xB523] = "Vaillant B523",
   [0xB524] = "Vaillant B524 extended registers",
   [0xB555] = "Vaillant B555 timer protocol",
 }
