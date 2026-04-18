@@ -144,15 +144,15 @@ function plugin.transaction_type(zz)
     return bits == 0x0 or bits == 0x1 or bits == 0x3 or bits == 0x7 or bits == 0xF
   end
   if initiator_part(zz & 0x0F) and initiator_part((zz >> 4) & 0x0F) then
-    return "Master-Master"
+    return "Primary-Primary"
   end
-  return "Master-Slave"
+  return "Primary-Secondary"
 end
 
-function plugin.parse_master_slave_segments(raw_tvb)
+function plugin.parse_primary_secondary_segments(raw_tvb)
   local raw_length = raw_tvb:len()
   if raw_length < 7 then
-    return nil, "master-slave transaction too short"
+    return nil, "primary-secondary transaction too short"
   end
 
   local request_length = raw_tvb(4, 1):uint()
@@ -320,8 +320,8 @@ function proto.dissector(buffer, pinfo, tree)
   local transaction_type = plugin.transaction_type(zz)
   subtree:add(fields.frame_type, transaction_type)
 
-  if transaction_type == "Master-Slave" then
-    local segments, segment_err = plugin.parse_master_slave_segments(raw_tvb)
+  if transaction_type == "Primary-Secondary" then
+    local segments, segment_err = plugin.parse_primary_secondary_segments(raw_tvb)
     if segments == nil then
       subtree:add_expert_info(PI_MALFORMED, PI_WARN, segment_err)
     else
