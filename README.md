@@ -1,5 +1,12 @@
 # helianthus-ebus-wireshark
 
+> [!WARNING]
+> **Retired.** This tool was retired by the Board on 2026-11-08. It receives no
+> further changes. For field debugging, capture eBUS traffic through the
+> gateway's MCP bus-observability tools in
+> [`helianthus-ebusgateway`](https://github.com/Project-Helianthus/helianthus-ebusgateway)
+> instead.
+
 `helianthus-ebus-wireshark` is the Helianthus Wireshark plugin repository for
 passive ENS and eBUS capture streams emitted by `helianthus-ebus-extcap`.
 
